@@ -25,7 +25,6 @@ fallback or reject that feature. It does not, by itself, mean that every
 related operation is unsupported on the device.
 """
 
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -228,40 +227,6 @@ class MoECommPolicy(Enum):
     CAPACITY_AND_WORLD_SIZE = auto()
     ALLGATHER = auto()
 
-
-def _a6_moe_comm_policy() -> MoECommPolicy:
-    """MoE communication policy for A6, overridable for A/B runs.
-
-    Default is the legacy ``CAPACITY_AND_EXPERT_DENSITY`` (pure ALLGATHER for
-    DSv4-Flash on EP8), **not** A5's ``CAPACITY_AND_WORLD_SIZE``.
-
-    A6 silicon is close to A5, but the MC2/ALLTOALL execution path does not run
-    on it yet (2026-11-18, 2P DP2/EP2, all three runs crashed inside the
-    delivered MoE collectives with ``retCode=0x31 [vector core exception]``):
-
-    * MC2 (decode-sized batches) -> ``torch_npu.npu_moe_distribute_combine_v2``
-    * ALLTOALL (large prefill)   -> the matching dispatch path
-
-    The crash is independent of ``HCCL_OP_EXPANSION_MODE``: it reproduces with
-    ``CCU_MS`` and with the variable unset, so it is not a CCU-mode issue and
-    cannot be configured around. Until CANN ships a working A6 kernel this
-    policy must stay on ALLGATHER, otherwise A6 cannot even initialize
-    (``Engine core initialization failed`` during ``profile_run``).
-
-    ``VLLM_ASCEND_A6_MOE_COMM_POLICY`` accepts ``expert_density`` (default,
-    legacy ALLGATHER) or ``world_size`` (A5 behaviour, A/B only - will crash
-    during init on A6 today).
-    """
-
-    raw = os.environ.get("VLLM_ASCEND_A6_MOE_COMM_POLICY", "").strip().lower()
-    if raw in ("", "expert_density", "capacity_and_expert_density", "legacy"):
-        return MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY
-    if raw in ("world_size", "capacity_and_world_size"):
-        return MoECommPolicy.CAPACITY_AND_WORLD_SIZE
-    raise ValueError(
-        "VLLM_ASCEND_A6_MOE_COMM_POLICY must be 'expert_density' or "
-        f"'world_size', got {raw!r}"
-    )
 
 
 class QuantizationBackendFamily(Enum):
@@ -574,7 +539,12 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             device_adaptor_family=DeviceAdaptorFamily.A6,
             device_addressing_mode=DeviceAddressingMode.DIRECT,
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
-            moe_comm_policy=_a6_moe_comm_policy(),
+            # A6-ADAPT: MC2/ALLTOALL do not run on A6 yet (2026-11-18, 2P DP2/EP2:
+            # all attempts died inside the delivered MoE collectives with
+            # retCode=0x31 [vector core exception], independent of
+            # HCCL_OP_EXPANSION_MODE). Stay on the legacy ALLGATHER selector
+            # until CANN ships a working A6 kernel.
+            moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
             capabilities=_A6_CAPABILITIES,
         ),
