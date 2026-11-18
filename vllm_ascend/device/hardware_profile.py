@@ -25,6 +25,7 @@ fallback or reject that feature. It does not, by itself, mean that every
 related operation is unsupported on the device.
 """
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -223,6 +224,31 @@ class MoECommPolicy(Enum):
     FUSED_OR_CAPACITY = auto()
     CAPACITY_AND_WORLD_SIZE = auto()
     ALLGATHER = auto()
+
+
+def _a6_moe_comm_policy() -> MoECommPolicy:
+    """MoE communication policy for A6, overridable for A/B runs.
+
+    A6 silicon is close to A5, so it inherits A5's policy
+    (``CAPACITY_AND_WORLD_SIZE``: MC2 for decode-sized batches, ALLTOALL for
+    large prefill batches). The historical A2-style
+    ``CAPACITY_AND_EXPERT_DENSITY`` selector has no ALLTOALL branch and
+    degenerates to pure ALLGATHER for DSv4-Flash on EP8
+    (256 // 8 = 32 experts per device > 24) at every token count.
+
+    ``VLLM_ASCEND_A6_MOE_COMM_POLICY`` accepts ``world_size`` (default) or
+    ``expert_density`` (legacy behaviour, for A/B only).
+    """
+
+    raw = os.environ.get("VLLM_ASCEND_A6_MOE_COMM_POLICY", "").strip().lower()
+    if raw in ("", "world_size", "capacity_and_world_size"):
+        return MoECommPolicy.CAPACITY_AND_WORLD_SIZE
+    if raw in ("expert_density", "capacity_and_expert_density", "legacy"):
+        return MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY
+    raise ValueError(
+        "VLLM_ASCEND_A6_MOE_COMM_POLICY must be 'world_size' or "
+        f"'expert_density', got {raw!r}"
+    )
 
 
 class QuantizationBackendFamily(Enum):
@@ -532,7 +558,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             device_adaptor_family=DeviceAdaptorFamily.A6,
             device_addressing_mode=DeviceAddressingMode.DIRECT,
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
-            moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
+            moe_comm_policy=_a6_moe_comm_policy(),
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
             capabilities=_A6_CAPABILITIES,
         ),
