@@ -232,25 +232,35 @@ class MoECommPolicy(Enum):
 def _a6_moe_comm_policy() -> MoECommPolicy:
     """MoE communication policy for A6, overridable for A/B runs.
 
-    A6 silicon is close to A5, so it inherits A5's policy
-    (``CAPACITY_AND_WORLD_SIZE``: MC2 for decode-sized batches, ALLTOALL for
-    large prefill batches). The historical A2-style
-    ``CAPACITY_AND_EXPERT_DENSITY`` selector has no ALLTOALL branch and
-    degenerates to pure ALLGATHER for DSv4-Flash on EP8
-    (256 // 8 = 32 experts per device > 24) at every token count.
+    Default is the legacy ``CAPACITY_AND_EXPERT_DENSITY`` (pure ALLGATHER for
+    DSv4-Flash on EP8), **not** A5's ``CAPACITY_AND_WORLD_SIZE``.
 
-    ``VLLM_ASCEND_A6_MOE_COMM_POLICY`` accepts ``world_size`` (default) or
-    ``expert_density`` (legacy behaviour, for A/B only).
+    A6 silicon is close to A5, but the MC2/ALLTOALL execution path does not run
+    on it yet (2026-11-18, 2P DP2/EP2, all three runs crashed inside the
+    delivered MoE collectives with ``retCode=0x31 [vector core exception]``):
+
+    * MC2 (decode-sized batches) -> ``torch_npu.npu_moe_distribute_combine_v2``
+    * ALLTOALL (large prefill)   -> the matching dispatch path
+
+    The crash is independent of ``HCCL_OP_EXPANSION_MODE``: it reproduces with
+    ``CCU_MS`` and with the variable unset, so it is not a CCU-mode issue and
+    cannot be configured around. Until CANN ships a working A6 kernel this
+    policy must stay on ALLGATHER, otherwise A6 cannot even initialize
+    (``Engine core initialization failed`` during ``profile_run``).
+
+    ``VLLM_ASCEND_A6_MOE_COMM_POLICY`` accepts ``expert_density`` (default,
+    legacy ALLGATHER) or ``world_size`` (A5 behaviour, A/B only - will crash
+    during init on A6 today).
     """
 
     raw = os.environ.get("VLLM_ASCEND_A6_MOE_COMM_POLICY", "").strip().lower()
-    if raw in ("", "world_size", "capacity_and_world_size"):
-        return MoECommPolicy.CAPACITY_AND_WORLD_SIZE
-    if raw in ("expert_density", "capacity_and_expert_density", "legacy"):
+    if raw in ("", "expert_density", "capacity_and_expert_density", "legacy"):
         return MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY
+    if raw in ("world_size", "capacity_and_world_size"):
+        return MoECommPolicy.CAPACITY_AND_WORLD_SIZE
     raise ValueError(
-        "VLLM_ASCEND_A6_MOE_COMM_POLICY must be 'world_size' or "
-        f"'expert_density', got {raw!r}"
+        "VLLM_ASCEND_A6_MOE_COMM_POLICY must be 'expert_density' or "
+        f"'world_size', got {raw!r}"
     )
 
 
